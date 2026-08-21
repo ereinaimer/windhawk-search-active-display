@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Fixed an issue where native DPI scaling could fail silently on some systems by explicitly linking `Shcore.dll`.
 - Resolved DPI scaling bugs with proper error checks and safe 96 DPI fallback.
+- Guarded monitor queries against null original results to preserve system behavior for `MONITOR_DEFAULTTONULL`.
 
 ## [1.0.0] - 2026-08-21
 ### Added

@@ -198,6 +198,9 @@ void MoveWindowToMonitor(HWND hwnd, HMONITOR targetMonitor) {
 
 HMONITOR WINAPI MonitorFromWindow_Hook(HWND hwnd, DWORD dwFlags) {
     HMONITOR original = MonitorFromWindow_Original(hwnd, dwFlags);
+    if (!original) {
+        return original;
+    }
 
     if (IsCoreWindow(hwnd)) {
         HMONITOR target = GetTargetMonitor();
@@ -221,6 +224,9 @@ HMONITOR WINAPI MonitorFromWindow_Hook(HWND hwnd, DWORD dwFlags) {
 
 HMONITOR WINAPI MonitorFromRect_Hook(LPCRECT lprc, DWORD dwFlags) {
     HMONITOR original = MonitorFromRect_Original(lprc, dwFlags);
+    if (!original) {
+        return original;
+    }
 
     if (!lprc) {
         return original;
