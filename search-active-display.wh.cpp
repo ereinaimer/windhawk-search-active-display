@@ -4,7 +4,7 @@
 // @description     Opens Win+S search on the monitor where the mouse cursor is located, or in a custom monitor of choice
 // @version         1.4
 // @author          ereinaimer
-// @github          https://github.com/ereinaimer
+// @github          https://github.com/ereinaimer/windhawk-search-active-display
 // @include         SearchHost.exe
 // @architecture    x86-64
 // @license         MIT
@@ -64,6 +64,9 @@ struct {
     WindhawkUtils::StringSetting monitorInterfaceName;
 } g_settings;
 
+using GetDpiForMonitor_t = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+GetDpiForMonitor_t g_pGetDpiForMonitor = nullptr;
+
 // ============================================================================
 // Monitor resolution helpers
 // ============================================================================
@@ -111,7 +114,6 @@ HMONITOR GetMonitorByInterfaceNameSubstr(PCWSTR interfaceNameSubstr) {
                        monitorInfo.szDevice, displayDevice.DeviceID);
 
                 if (wcsstr(displayDevice.DeviceID, interfaceNameSubstr)) {
-                    Wh_Log(L"Matched display device");
                     monitorResult = hMonitor;
                     return FALSE;
                 }
@@ -146,10 +148,7 @@ HMONITOR GetTargetMonitor() {
     return nullptr;
 }
 
-// ============================================================================
-// ============================================================================
 // Win32 API hooks in SearchHost.exe
-// ============================================================================
 
 using MonitorFromWindow_t = decltype(&MonitorFromWindow);
 MonitorFromWindow_t MonitorFromWindow_Original;
@@ -157,9 +156,7 @@ MonitorFromWindow_t MonitorFromWindow_Original;
 using MonitorFromRect_t = decltype(&MonitorFromRect);
 MonitorFromRect_t MonitorFromRect_Original;
 
-// ============================================================================
 // CoreWindow detection and repositioning
-// ============================================================================
 
 bool IsCoreWindow(HWND hwnd) {
     WCHAR className[256] = {0};
@@ -189,18 +186,12 @@ void MoveWindowToMonitor(HWND hwnd, HMONITOR targetMonitor) {
     GetMonitorInfo(targetMonitor, &targetMi);
 
     // Get DPI for both monitors to handle scaling
-    HMODULE shcore = LoadLibraryW(L"Shcore.dll");
     UINT dpiCurrentX = 96, dpiCurrentY = 96;
     UINT dpiTargetX = 96, dpiTargetY = 96;
     
-    if (shcore) {
-        using GetDpiForMonitor_t = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
-        auto pGetDpiForMonitor = (GetDpiForMonitor_t)GetProcAddress(shcore, "GetDpiForMonitor");
-        if (pGetDpiForMonitor) {
-            pGetDpiForMonitor(currentMonitor, 0 /* MDT_EFFECTIVE_DPI */, &dpiCurrentX, &dpiCurrentY);
-            pGetDpiForMonitor(targetMonitor, 0 /* MDT_EFFECTIVE_DPI */, &dpiTargetX, &dpiTargetY);
-        }
-        FreeLibrary(shcore);
+    if (g_pGetDpiForMonitor) {
+        g_pGetDpiForMonitor(currentMonitor, 0 /* MDT_EFFECTIVE_DPI */, &dpiCurrentX, &dpiCurrentY);
+        g_pGetDpiForMonitor(targetMonitor, 0 /* MDT_EFFECTIVE_DPI */, &dpiTargetX, &dpiTargetY);
     }
 
     // Current window dimensions
@@ -225,8 +216,6 @@ void MoveWindowToMonitor(HWND hwnd, HMONITOR targetMonitor) {
     int newX = targetCenterXScreen + targetOffsetCenter - (targetWidth / 2);
     int newY = targetMi.rcWork.bottom - targetOffsetBottom - targetHeight;
 
-    Wh_Log(L"Moving CoreWindow %p: pos=(%d,%d) size=(%d,%d)", hwnd, newX, newY, targetWidth, targetHeight);
-
     SetWindowPos(hwnd, nullptr, newX, newY, targetWidth, targetHeight,
                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
 }
@@ -237,9 +226,6 @@ HMONITOR WINAPI MonitorFromWindow_Hook(HWND hwnd, DWORD dwFlags) {
     if (IsCoreWindow(hwnd)) {
         HMONITOR target = GetTargetMonitor();
         if (target && target != original) {
-            Wh_Log(L"MonitorFromWindow override: hwnd=%p original=%p -> target=%p",
-                   hwnd, original, target);
-
             // Physically move the window to the target monitor with precise anchoring
             MoveWindowToMonitor(hwnd, target);
 
@@ -260,14 +246,13 @@ HMONITOR WINAPI MonitorFromRect_Hook(LPCRECT lprc, DWORD dwFlags) {
     // Check if this rect belongs to a search window by checking its size.
     // The search window is typically a large centered flyout (800x750ish).
     // We override for any rect that the search host queries.
-    HMONITOR target = GetTargetMonitor();
-    if (target && target != original) {
-        // Only override for rects that are clearly a window rect (not tiny UI elements)
-        int width = lprc->right - lprc->left;
-        int height = lprc->bottom - lprc->top;
-        if (width > 200 && height > 200) {
-            Wh_Log(L"MonitorFromRect override: rect=(%d,%d)-(%d,%d) original=%p -> target=%p",
-                   lprc->left, lprc->top, lprc->right, lprc->bottom, original, target);
+    int width = lprc->right - lprc->left;
+    int height = lprc->bottom - lprc->top;
+    
+    // Only query target monitor and override for rects that are clearly a window rect (not tiny UI elements)
+    if (width > 200 && height > 200) {
+        HMONITOR target = GetTargetMonitor();
+        if (target && target != original) {
             return target;
         }
     }
@@ -275,9 +260,7 @@ HMONITOR WINAPI MonitorFromRect_Hook(LPCRECT lprc, DWORD dwFlags) {
     return original;
 }
 
-// ============================================================================
 // Windhawk callbacks
-// ============================================================================
 
 void LoadSettings() {
     g_settings.monitor = Wh_GetIntSetting(L"monitor");
@@ -286,8 +269,7 @@ void LoadSettings() {
 }
 
 BOOL Wh_ModInit() {
-    Wh_Log(L">");
-
+    Wh_Log(L"Search on Active Display initialized");
     LoadSettings();
 
     WCHAR processFileName[MAX_PATH];
@@ -305,6 +287,11 @@ BOOL Wh_ModInit() {
         return FALSE;
     }
 
+    HMODULE shcoreModule = GetModuleHandleW(L"Shcore.dll");
+    if (shcoreModule) {
+        g_pGetDpiForMonitor = (GetDpiForMonitor_t)GetProcAddress(shcoreModule, "GetDpiForMonitor");
+    }
+
     if (_wcsicmp(processName, L"SearchHost.exe") == 0) {
         WindhawkUtils::SetFunctionHook(
             (void*)GetProcAddress(user32Module, "MonitorFromWindow"),
@@ -315,18 +302,14 @@ BOOL Wh_ModInit() {
             (void*)GetProcAddress(user32Module, "MonitorFromRect"),
             (void*)MonitorFromRect_Hook,
             (void**)&MonitorFromRect_Original);
-
-        Wh_Log(L"Hooks installed in SearchHost.exe");
     }
 
     return TRUE;
 }
 
 void Wh_ModUninit() {
-    Wh_Log(L">");
 }
 
 void Wh_ModSettingsChanged() {
-    Wh_Log(L">");
     LoadSettings();
 }
