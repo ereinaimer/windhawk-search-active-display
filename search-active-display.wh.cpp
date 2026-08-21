@@ -2,7 +2,7 @@
 // @id              search-active-display
 // @name            Search on Active Display
 // @description     Opens Win+S search on the monitor where the mouse cursor is located, or in a custom monitor of choice
-// @version         1.4
+// @version         1.0
 // @author          ereinaimer
 // @github          https://github.com/ereinaimer/windhawk-search-active-display
 // @include         SearchHost.exe
@@ -67,9 +67,7 @@ struct {
 using GetDpiForMonitor_t = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
 GetDpiForMonitor_t g_pGetDpiForMonitor = nullptr;
 
-// ============================================================================
 // Monitor resolution helpers
-// ============================================================================
 
 HMONITOR GetMonitorById(int monitorId) {
     HMONITOR monitorResult = nullptr;
