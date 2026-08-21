@@ -2,7 +2,7 @@
 // @id              search-active-display
 // @name            Search on Active Display
 // @description     Opens Win+S search on the monitor where the mouse cursor is located, or in a custom monitor of choice
-// @version         1.0
+// @version         1.0.0
 // @author          ereinaimer
 // @github          https://github.com/ereinaimer/windhawk-search-active-display
 // @include         SearchHost.exe
