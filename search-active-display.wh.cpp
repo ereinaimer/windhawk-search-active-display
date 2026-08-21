@@ -163,8 +163,12 @@ void MoveWindowToMonitor(HWND hwnd, HMONITOR targetMonitor) {
     UINT dpiCurrentX = 96, dpiCurrentY = 96;
     UINT dpiTargetX = 96, dpiTargetY = 96;
     
-    GetDpiForMonitor(currentMonitor, MDT_EFFECTIVE_DPI, &dpiCurrentX, &dpiCurrentY);
-    GetDpiForMonitor(targetMonitor, MDT_EFFECTIVE_DPI, &dpiTargetX, &dpiTargetY);
+    if (FAILED(GetDpiForMonitor(currentMonitor, MDT_EFFECTIVE_DPI, &dpiCurrentX, &dpiCurrentY))) {
+        dpiCurrentX = dpiCurrentY = 96;
+    }
+    if (FAILED(GetDpiForMonitor(targetMonitor, MDT_EFFECTIVE_DPI, &dpiTargetX, &dpiTargetY))) {
+        dpiTargetX = dpiTargetY = 96;
+    }
 
     // Current window dimensions
     int windowWidth = windowRect.right - windowRect.left;
@@ -198,17 +202,16 @@ HMONITOR WINAPI MonitorFromWindow_Hook(HWND hwnd, DWORD dwFlags) {
     if (IsCoreWindow(hwnd)) {
         HMONITOR target = GetTargetMonitor();
         if (target && target != original) {
-            static thread_local bool isMoving = false;
-            if (!isMoving) {
-                isMoving = true;
-                // We hook the query API instead of SetWindowPos because UWP's XAML layout engine
-                // rigidly enforces its own layout coordinates and aggressively overrides SetWindowPos hooks,
-                // causing the window to snap back to the primary monitor. Spoofing the monitor query 
-                // prevents the layout engine from fighting the manual MoveWindowToMonitor translation.
-                MoveWindowToMonitor(hwnd, target);
-                isMoving = false;
-            }
-
+            // We hook the query API instead of SetWindowPos because UWP's XAML layout engine
+            // rigidly enforces its own layout coordinates and aggressively overrides SetWindowPos hooks,
+            // causing the window to snap back to the primary monitor. Spoofing the monitor query 
+            // prevents the layout engine from fighting the manual MoveWindowToMonitor translation.
+            //
+            // A re-entrancy guard cannot be used here. During SetWindowPos, the layout engine
+            // synchronously queries MonitorFromWindow to validate the new bounds. If the query
+            // spoof is guarded, the engine will see the primary monitor, reject the change,
+            // and snap the window back.
+            MoveWindowToMonitor(hwnd, target);
             return target;
         }
     }

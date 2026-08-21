@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.0] - 2026-08-21
 ### Changed
-- Improved hooking stability by introducing a reentrancy guard to prevent potential stack overflow edge cases.
 - Completely rewrote monitor identification logic to ensure full MIT license compliance.
+- Solved monitor identification license issues by rewriting resolution helpers.
+
+### Fixed
 - Fixed an issue where native DPI scaling could fail silently on some systems by explicitly linking `Shcore.dll`.
+- Resolved DPI scaling bugs with proper error checks and safe 96 DPI fallback.
 
 ## [1.0.0] - 2026-08-21
 ### Added
