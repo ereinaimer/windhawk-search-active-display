@@ -2,11 +2,12 @@
 // @id              search-active-display
 // @name            Search on Active Display
 // @description     Opens Win+S search on the monitor where the mouse cursor is located, or in a custom monitor of choice
-// @version         1.0.0
+// @version         1.1.0
 // @author          ereinaimer
 // @github          https://github.com/ereinaimer
 // @include         SearchHost.exe
 // @architecture    x86-64
+// @compilerOptions -lshcore
 // @license         MIT
 // ==/WindhawkMod==
 
@@ -58,91 +59,66 @@ name for stable identification across reboots.
 // ==/WindhawkModSettings==
 
 #include <windhawk_utils.h>
+#include <shellscalingapi.h>
 
 struct {
     int monitor;
     WindhawkUtils::StringSetting monitorInterfaceName;
 } g_settings;
 
-using GetDpiForMonitor_t = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
-GetDpiForMonitor_t g_pGetDpiForMonitor = nullptr;
+struct MonitorSearchContext {
+    int targetId;
+    int currentId;
+    PCWSTR targetInterface;
+    HMONITOR result;
+};
 
-// Monitor resolution helpers
-
-HMONITOR GetMonitorById(int monitorId) {
-    HMONITOR monitorResult = nullptr;
-    int currentMonitorId = 0;
-
-    auto monitorEnumProc = [&](HMONITOR hMonitor) -> BOOL {
-        if (currentMonitorId == monitorId) {
-            monitorResult = hMonitor;
+BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC hdc, LPRECT lprcMonitor, LPARAM dwData) {
+    auto* ctx = reinterpret_cast<MonitorSearchContext*>(dwData);
+    
+    if (!ctx->targetInterface) {
+        if (ctx->currentId == ctx->targetId) {
+            ctx->result = hMonitor;
             return FALSE;
         }
-        currentMonitorId++;
+        ctx->currentId++;
         return TRUE;
-    };
-
-    EnumDisplayMonitors(
-        nullptr, nullptr,
-        [](HMONITOR hMonitor, HDC hdc, LPRECT lprcMonitor,
-           LPARAM dwData) -> BOOL {
-            auto& proc = *reinterpret_cast<decltype(monitorEnumProc)*>(dwData);
-            return proc(hMonitor);
-        },
-        reinterpret_cast<LPARAM>(&monitorEnumProc));
-
-    return monitorResult;
-}
-
-HMONITOR GetMonitorByInterfaceNameSubstr(PCWSTR interfaceNameSubstr) {
-    HMONITOR monitorResult = nullptr;
-
-    auto monitorEnumProc = [&](HMONITOR hMonitor) -> BOOL {
-        MONITORINFOEX monitorInfo = {};
-        monitorInfo.cbSize = sizeof(monitorInfo);
-
-        if (GetMonitorInfo(hMonitor, &monitorInfo)) {
-            DISPLAY_DEVICE displayDevice = {
-                .cb = sizeof(displayDevice),
-            };
-
-            if (EnumDisplayDevices(monitorInfo.szDevice, 0, &displayDevice,
-                                   EDD_GET_DEVICE_INTERFACE_NAME)) {
-                Wh_Log(L"Found display device %s, interface name: %s",
-                       monitorInfo.szDevice, displayDevice.DeviceID);
-
-                if (wcsstr(displayDevice.DeviceID, interfaceNameSubstr)) {
-                    monitorResult = hMonitor;
-                    return FALSE;
-                }
+    }
+    
+    MONITORINFOEXW mi;
+    mi.cbSize = sizeof(mi);
+    if (GetMonitorInfoW(hMonitor, &mi)) {
+        DISPLAY_DEVICEW dd;
+        dd.cb = sizeof(dd);
+        if (EnumDisplayDevicesW(mi.szDevice, 0, &dd, EDD_GET_DEVICE_INTERFACE_NAME)) {
+            Wh_Log(L"Found display device %s, interface name: %s", mi.szDevice, dd.DeviceID);
+            if (wcsstr(dd.DeviceID, ctx->targetInterface)) {
+                ctx->result = hMonitor;
+                return FALSE;
             }
         }
-        return TRUE;
-    };
-
-    EnumDisplayMonitors(
-        nullptr, nullptr,
-        [](HMONITOR hMonitor, HDC hdc, LPRECT lprcMonitor,
-           LPARAM dwData) -> BOOL {
-            auto& proc = *reinterpret_cast<decltype(monitorEnumProc)*>(dwData);
-            return proc(hMonitor);
-        },
-        reinterpret_cast<LPARAM>(&monitorEnumProc));
-
-    return monitorResult;
+    }
+    return TRUE;
 }
 
 HMONITOR GetTargetMonitor() {
-    if (*g_settings.monitorInterfaceName.get()) {
-        return GetMonitorByInterfaceNameSubstr(
-            g_settings.monitorInterfaceName.get());
-    } else if (g_settings.monitor == 0) {
-        POINT pt;
-        GetCursorPos(&pt);
-        return MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-    } else if (g_settings.monitor >= 1) {
-        return GetMonitorById(g_settings.monitor - 1);
+    if (g_settings.monitorInterfaceName.get()[0] != L'\0') {
+        MonitorSearchContext ctx = {0, 0, g_settings.monitorInterfaceName.get(), nullptr};
+        EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&ctx));
+        return ctx.result;
     }
+    
+    if (g_settings.monitor == 0) {
+        POINT pt;
+        if (GetCursorPos(&pt)) {
+            return MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        }
+    } else if (g_settings.monitor >= 1) {
+        MonitorSearchContext ctx = {g_settings.monitor - 1, 0, nullptr, nullptr};
+        EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, reinterpret_cast<LPARAM>(&ctx));
+        return ctx.result;
+    }
+    
     return nullptr;
 }
 
@@ -187,10 +163,8 @@ void MoveWindowToMonitor(HWND hwnd, HMONITOR targetMonitor) {
     UINT dpiCurrentX = 96, dpiCurrentY = 96;
     UINT dpiTargetX = 96, dpiTargetY = 96;
     
-    if (g_pGetDpiForMonitor) {
-        g_pGetDpiForMonitor(currentMonitor, 0 /* MDT_EFFECTIVE_DPI */, &dpiCurrentX, &dpiCurrentY);
-        g_pGetDpiForMonitor(targetMonitor, 0 /* MDT_EFFECTIVE_DPI */, &dpiTargetX, &dpiTargetY);
-    }
+    GetDpiForMonitor(currentMonitor, MDT_EFFECTIVE_DPI, &dpiCurrentX, &dpiCurrentY);
+    GetDpiForMonitor(targetMonitor, MDT_EFFECTIVE_DPI, &dpiTargetX, &dpiTargetY);
 
     // Current window dimensions
     int windowWidth = windowRect.right - windowRect.left;
@@ -224,8 +198,16 @@ HMONITOR WINAPI MonitorFromWindow_Hook(HWND hwnd, DWORD dwFlags) {
     if (IsCoreWindow(hwnd)) {
         HMONITOR target = GetTargetMonitor();
         if (target && target != original) {
-            // Physically move the window to the target monitor with precise anchoring
-            MoveWindowToMonitor(hwnd, target);
+            static thread_local bool isMoving = false;
+            if (!isMoving) {
+                isMoving = true;
+                // We hook the query API instead of SetWindowPos because UWP's XAML layout engine
+                // rigidly enforces its own layout coordinates and aggressively overrides SetWindowPos hooks,
+                // causing the window to snap back to the primary monitor. Spoofing the monitor query 
+                // prevents the layout engine from fighting the manual MoveWindowToMonitor translation.
+                MoveWindowToMonitor(hwnd, target);
+                isMoving = false;
+            }
 
             return target;
         }
@@ -285,10 +267,6 @@ BOOL Wh_ModInit() {
         return FALSE;
     }
 
-    HMODULE shcoreModule = GetModuleHandleW(L"Shcore.dll");
-    if (shcoreModule) {
-        g_pGetDpiForMonitor = (GetDpiForMonitor_t)GetProcAddress(shcoreModule, "GetDpiForMonitor");
-    }
 
     if (_wcsicmp(processName, L"SearchHost.exe") == 0) {
         WindhawkUtils::SetFunctionHook(
