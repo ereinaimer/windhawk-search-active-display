@@ -168,7 +168,7 @@ bool IsCoreWindow(HWND hwnd) {
 }
 
 // Translate a window rect from its current monitor to the target monitor,
-// preserving relative position within the monitor's work area.
+// preserving relative position within the monitor's work area and scaling by DPI.
 void MoveWindowToMonitor(HWND hwnd, HMONITOR targetMonitor) {
     RECT windowRect;
     if (!GetWindowRect(hwnd, &windowRect)) {
@@ -188,24 +188,47 @@ void MoveWindowToMonitor(HWND hwnd, HMONITOR targetMonitor) {
     GetMonitorInfo(currentMonitor, &currentMi);
     GetMonitorInfo(targetMonitor, &targetMi);
 
-    // Compute the window's relative position within the current monitor
+    // Get DPI for both monitors to handle scaling
+    HMODULE shcore = LoadLibraryW(L"Shcore.dll");
+    UINT dpiCurrentX = 96, dpiCurrentY = 96;
+    UINT dpiTargetX = 96, dpiTargetY = 96;
+    
+    if (shcore) {
+        using GetDpiForMonitor_t = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+        auto pGetDpiForMonitor = (GetDpiForMonitor_t)GetProcAddress(shcore, "GetDpiForMonitor");
+        if (pGetDpiForMonitor) {
+            pGetDpiForMonitor(currentMonitor, 0 /* MDT_EFFECTIVE_DPI */, &dpiCurrentX, &dpiCurrentY);
+            pGetDpiForMonitor(targetMonitor, 0 /* MDT_EFFECTIVE_DPI */, &dpiTargetX, &dpiTargetY);
+        }
+        FreeLibrary(shcore);
+    }
+
+    // Current window dimensions
     int windowWidth = windowRect.right - windowRect.left;
     int windowHeight = windowRect.bottom - windowRect.top;
 
-    int currentMonWidth = currentMi.rcWork.right - currentMi.rcWork.left;
-    int currentMonHeight = currentMi.rcWork.bottom - currentMi.rcWork.top;
-    int targetMonWidth = targetMi.rcWork.right - targetMi.rcWork.left;
-    int targetMonHeight = targetMi.rcWork.bottom - targetMi.rcWork.top;
+    // Scale dimensions based on DPI ratio
+    int targetWidth = MulDiv(windowWidth, dpiTargetX, dpiCurrentX);
+    int targetHeight = MulDiv(windowHeight, dpiTargetY, dpiCurrentY);
 
-    // Center the window on the target monitor's work area (same as native behavior)
-    int newX = targetMi.rcWork.left + (targetMonWidth - windowWidth) / 2;
-    int newY = targetMi.rcWork.top + (targetMonHeight - windowHeight) / 2;
+    // Compute offset from the bottom of the current monitor's work area
+    int offsetBottom = currentMi.rcWork.bottom - windowRect.bottom;
+    int targetOffsetBottom = MulDiv(offsetBottom, dpiTargetY, dpiCurrentY);
 
-    Wh_Log(L"Moving CoreWindow %p from monitor %p to %p, new pos=(%d,%d)",
-           hwnd, currentMonitor, targetMonitor, newX, newY);
+    // Compute horizontal offset from the center of the current monitor's work area
+    int currentCenterX = (currentMi.rcWork.left + currentMi.rcWork.right) / 2;
+    int offsetCenter = ((windowRect.left + windowRect.right) / 2) - currentCenterX;
+    int targetOffsetCenter = MulDiv(offsetCenter, dpiTargetX, dpiCurrentX);
 
-    SetWindowPos(hwnd, nullptr, newX, newY, 0, 0,
-                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+    // Apply the scaled offsets to the target monitor's work area
+    int targetCenterXScreen = (targetMi.rcWork.left + targetMi.rcWork.right) / 2;
+    int newX = targetCenterXScreen + targetOffsetCenter - (targetWidth / 2);
+    int newY = targetMi.rcWork.bottom - targetOffsetBottom - targetHeight;
+
+    Wh_Log(L"Moving CoreWindow %p: pos=(%d,%d) size=(%d,%d)", hwnd, newX, newY, targetWidth, targetHeight);
+
+    SetWindowPos(hwnd, nullptr, newX, newY, targetWidth, targetHeight,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
 }
 
 HMONITOR WINAPI MonitorFromWindow_Hook(HWND hwnd, DWORD dwFlags) {
@@ -217,7 +240,7 @@ HMONITOR WINAPI MonitorFromWindow_Hook(HWND hwnd, DWORD dwFlags) {
             Wh_Log(L"MonitorFromWindow override: hwnd=%p original=%p -> target=%p",
                    hwnd, original, target);
 
-            // Physically move the window to the target monitor
+            // Physically move the window to the target monitor with precise anchoring
             MoveWindowToMonitor(hwnd, target);
 
             return target;
@@ -267,23 +290,34 @@ BOOL Wh_ModInit() {
 
     LoadSettings();
 
+    WCHAR processFileName[MAX_PATH];
+    GetModuleFileName(NULL, processFileName, ARRAYSIZE(processFileName));
+    PCWSTR processName = wcsrchr(processFileName, L'\\');
+    if (processName) {
+        processName++;
+    } else {
+        processName = processFileName;
+    }
+
     HMODULE user32Module = GetModuleHandle(L"user32.dll");
     if (!user32Module) {
         Wh_Log(L"Couldn't get user32.dll");
         return FALSE;
     }
 
-    WindhawkUtils::SetFunctionHook(
-        (void*)GetProcAddress(user32Module, "MonitorFromWindow"),
-        (void*)MonitorFromWindow_Hook,
-        (void**)&MonitorFromWindow_Original);
+    if (_wcsicmp(processName, L"SearchHost.exe") == 0) {
+        WindhawkUtils::SetFunctionHook(
+            (void*)GetProcAddress(user32Module, "MonitorFromWindow"),
+            (void*)MonitorFromWindow_Hook,
+            (void**)&MonitorFromWindow_Original);
 
-    WindhawkUtils::SetFunctionHook(
-        (void*)GetProcAddress(user32Module, "MonitorFromRect"),
-        (void*)MonitorFromRect_Hook,
-        (void**)&MonitorFromRect_Original);
+        WindhawkUtils::SetFunctionHook(
+            (void*)GetProcAddress(user32Module, "MonitorFromRect"),
+            (void*)MonitorFromRect_Hook,
+            (void**)&MonitorFromRect_Original);
 
-    Wh_Log(L"Hooks installed in SearchHost.exe");
+        Wh_Log(L"Hooks installed in SearchHost.exe");
+    }
 
     return TRUE;
 }
